@@ -111,6 +111,16 @@ fi
 
 echo "[info] PX4 started (pid=$PX4_PID, model=$PX4_SIM_MODEL)"
 
+if [ -x "$PX4_PARAM_BIN" ]; then
+  echo "[info] applying fixed-wing SITL arming/failsafe params"
+  "$PX4_PARAM_BIN" set CBRK_SUPPLY_CHK 894281 >/dev/null 2>&1 || true
+  "$PX4_PARAM_BIN" set NAV_DLL_ACT 0 >/dev/null 2>&1 || true
+  "$PX4_PARAM_BIN" set COM_LOW_BAT_ACT 0 >/dev/null 2>&1 || true
+  "$PX4_PARAM_BIN" set FD_FAIL_R 0 >/dev/null 2>&1 || true
+  "$PX4_PARAM_BIN" set FD_FAIL_P 0 >/dev/null 2>&1 || true
+  "$PX4_PARAM_BIN" save >/dev/null 2>&1 || true
+fi
+
 
 echo "[info] starting MAVROS"
 setsid -f bash -lc "

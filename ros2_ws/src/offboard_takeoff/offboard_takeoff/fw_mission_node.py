@@ -21,17 +21,28 @@ class FWMissionNode(Node):
         self.declare_parameter('setpoint_rate_hz', 10.0)
         self.declare_parameter('preflight_timeout_sec', 120.0)
         self.declare_parameter('mission_timeout_sec', 300.0)
+        self.declare_parameter('arm_settle_time_sec', 3.0)
         self.declare_parameter('force_arm_if_needed', True)
         self.declare_parameter('position_tolerance_m', 15.0)
         self.declare_parameter('cruise_speed_mps', 12.0)
         self.declare_parameter('takeoff_altitude_m', 30.0)
         self.declare_parameter('loiter_after_mission', True)
+        self.declare_parameter('post_mission_loiter_sec', 5.0)
+        self.declare_parameter('min_forward_track_dist_m', 20.0)
+        self.declare_parameter('max_vertical_speed_mps', 2.0)
+        self.declare_parameter('launch_lead_dist_m', 80.0)
+        self.declare_parameter('insert_launch_lead_waypoint', True)
+        self.declare_parameter('enforce_altitude_for_reach', False)
+        self.declare_parameter('altitude_tolerance_m', 20.0)
+        self.declare_parameter('enable_flyby_waypoint_acceptance', True)
+        self.declare_parameter('flyby_cross_track_m', 45.0)
 
         self.setpoint_rate_hz = float(self.get_parameter('setpoint_rate_hz').value)
         self.preflight_timeout_sec = float(
             self.get_parameter('preflight_timeout_sec').value
         )
         self.mission_timeout_sec = float(self.get_parameter('mission_timeout_sec').value)
+        self.arm_settle_time_sec = float(self.get_parameter('arm_settle_time_sec').value)
         self.force_arm_if_needed = bool(self.get_parameter('force_arm_if_needed').value)
         self.position_tolerance_m = float(
             self.get_parameter('position_tolerance_m').value
@@ -39,6 +50,31 @@ class FWMissionNode(Node):
         self.cruise_speed_mps = float(self.get_parameter('cruise_speed_mps').value)
         self.takeoff_altitude_m = float(self.get_parameter('takeoff_altitude_m').value)
         self.loiter_after_mission = bool(self.get_parameter('loiter_after_mission').value)
+        self.post_mission_loiter_sec = float(
+            self.get_parameter('post_mission_loiter_sec').value
+        )
+        self.min_forward_track_dist_m = float(
+            self.get_parameter('min_forward_track_dist_m').value
+        )
+        self.max_vertical_speed_mps = float(
+            self.get_parameter('max_vertical_speed_mps').value
+        )
+        self.launch_lead_dist_m = float(self.get_parameter('launch_lead_dist_m').value)
+        self.insert_launch_lead_waypoint = bool(
+            self.get_parameter('insert_launch_lead_waypoint').value
+        )
+        self.enforce_altitude_for_reach = bool(
+            self.get_parameter('enforce_altitude_for_reach').value
+        )
+        self.altitude_tolerance_m = float(
+            self.get_parameter('altitude_tolerance_m').value
+        )
+        self.enable_flyby_waypoint_acceptance = bool(
+            self.get_parameter('enable_flyby_waypoint_acceptance').value
+        )
+        self.flyby_cross_track_m = float(
+            self.get_parameter('flyby_cross_track_m').value
+        )
 
         wp_param = str(self.get_parameter('waypoints').value).strip()
         self.waypoints = self._parse_waypoints(wp_param)
@@ -73,6 +109,14 @@ class FWMissionNode(Node):
 
         self.dt = 1.0 / self.setpoint_rate_hz
         self._current_local_pos = (0.0, 0.0, 0.0)
+        # Ignore acceleration / yaw fields to avoid undefined defaults in SET_POSITION_TARGET_LOCAL_NED.
+        self._base_type_mask = (
+            PositionTarget.IGNORE_AFX
+            | PositionTarget.IGNORE_AFY
+            | PositionTarget.IGNORE_AFZ
+            | PositionTarget.IGNORE_YAW
+            | PositionTarget.IGNORE_YAW_RATE
+        )
 
     @staticmethod
     def _parse_waypoints(text: str) -> List[Tuple[float, float, float]]:
@@ -188,30 +232,20 @@ class FWMissionNode(Node):
         type_mask: int = 0,
     ) -> None:
         """
-        Publish a PositionTarget for fixed-wing offboard control.
-
-        type_mask values:
-          0     = position + velocity (FW_POSCTRL_MODE_AUTO_PATH - plane flies toward point)
-          4096  = takeoff setpoint
-          8192  = land setpoint
-          12288 = loiter setpoint (circles centered on point)
+        Publish a fixed-wing PositionTarget using MAVROS local setpoint conventions (ENU input).
         """
         msg = PositionTarget()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.coordinate_frame = PositionTarget.FRAME_LOCAL_NED
 
-        # For FW: must include velocity feedforward to get AUTO_PATH mode
-        # type_mask bits: 0=px,1=py,2=pz,3=vx,4=vy,5=vz,6=afx,7=afy,8=afz,9=yaw,10=yaw_rate
-        # Unset bits = ignore that field. We set position + velocity.
-        # Default type_mask=0 means ALL fields valid.
-        msg.type_mask = type_mask
+        # Keep acceleration/yaw fields ignored; optionally add extra ignore bits from caller.
+        msg.type_mask = self._base_type_mask | type_mask
 
         msg.position.x = x
         msg.position.y = y
         msg.position.z = z
 
-        # Velocity feedforward: normalized direction toward target * cruise speed
-        # This triggers FW_POSCTRL_MODE_AUTO_PATH instead of orbit mode
+        # Velocity feed-forward drives path tracking for fixed-wing.
         if math.isfinite(vx) and (abs(vx) + abs(vy) + abs(vz)) > 0.01:
             msg.velocity.x = vx
             msg.velocity.y = vy
@@ -219,19 +253,39 @@ class FWMissionNode(Node):
 
         self.setpoint_pub.publish(msg)
 
+    @staticmethod
+    def _yaw_from_quaternion(x: float, y: float, z: float, w: float) -> float:
+        siny_cosp = 2.0 * (w * z + x * y)
+        cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+        return math.atan2(siny_cosp, cosy_cosp)
+
+    @staticmethod
+    def _clamp(value: float, low: float, high: float) -> float:
+        return max(low, min(high, value))
+
     def _compute_velocity_to_waypoint(
         self, wx: float, wy: float, wz: float,
     ) -> Tuple[float, float, float]:
-        """Compute velocity feedforward vector toward waypoint at cruise speed."""
+        """Compute fixed-wing-safe velocity feedforward toward waypoint."""
         cx, cy, cz = self._current_local_pos
         dx = wx - cx
         dy = wy - cy
         dz = wz - cz
-        dist = math.sqrt(dx * dx + dy * dy + dz * dz)
-        if dist < 0.1:
-            return (0.0, 0.0, 0.0)
-        scale = self.cruise_speed_mps / dist
-        return (dx * scale, dy * scale, dz * scale)
+        horiz_dist = math.hypot(dx, dy)
+
+        if horiz_dist < self.min_forward_track_dist_m:
+            q = self.local_pose.pose.orientation
+            yaw = self._yaw_from_quaternion(q.x, q.y, q.z, q.w)
+            ux = math.cos(yaw)
+            uy = math.sin(yaw)
+        else:
+            ux = dx / horiz_dist
+            uy = dy / horiz_dist
+
+        vx = ux * self.cruise_speed_mps
+        vy = uy * self.cruise_speed_mps
+        vz = self._clamp(dz, -self.max_vertical_speed_mps, self.max_vertical_speed_mps)
+        return (vx, vy, vz)
 
     def _publish_setpoint_burst(self, count: int) -> None:
         first_wp = self.waypoints[0]
@@ -252,19 +306,76 @@ class FWMissionNode(Node):
         dz = cz - z
         return math.sqrt(dx * dx + dy * dy + dz * dz)
 
-    def _reach_waypoint(self, x: float, y: float, z: float, timeout_sec: float) -> bool:
+    def _horizontal_distance_to(self, x: float, y: float) -> float:
+        cx, cy, _ = self._current_local_pos
+        return math.hypot(cx - x, cy - y)
+
+    @staticmethod
+    def _leg_progress_and_cross_track(
+        start_x: float,
+        start_y: float,
+        target_x: float,
+        target_y: float,
+        current_x: float,
+        current_y: float,
+    ) -> Tuple[float, float]:
+        leg_x = target_x - start_x
+        leg_y = target_y - start_y
+        leg_len = math.hypot(leg_x, leg_y)
+        if leg_len < 1e-3:
+            return (0.0, float('inf'))
+
+        rel_x = current_x - start_x
+        rel_y = current_y - start_y
+        progress = (rel_x * leg_x + rel_y * leg_y) / (leg_len * leg_len)
+        cross_track = abs(rel_x * leg_y - rel_y * leg_x) / leg_len
+        return (progress, cross_track)
+
+    def _reach_waypoint(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        timeout_sec: float,
+        leg_start_x: float,
+        leg_start_y: float,
+    ) -> bool:
         deadline = time.time() + timeout_sec
         while rclpy.ok() and time.time() < deadline:
             vx, vy, vz = self._compute_velocity_to_waypoint(x, y, z)
             self._publish_fw_setpoint(x, y, z, vx=vx, vy=vy, vz=vz)
             rclpy.spin_once(self, timeout_sec=0.05)
 
-            dist = self._distance_to(x, y, z)
-            if dist <= self.position_tolerance_m:
+            horiz_dist = self._horizontal_distance_to(x, y)
+            alt_err = abs(self._current_local_pos[2] - z)
+            reached = horiz_dist <= self.position_tolerance_m
+            if self.enforce_altitude_for_reach:
+                reached = reached and (alt_err <= self.altitude_tolerance_m)
+
+            if reached:
                 self.get_logger().info(
-                    f'Waypoint reached: dist={dist:.1f}m (tol={self.position_tolerance_m:.1f}m)'
+                    'Waypoint reached: '
+                    f'horiz={horiz_dist:.1f}m (tol={self.position_tolerance_m:.1f}m), '
+                    f'alt_err={alt_err:.1f}m'
                 )
                 return True
+
+            if self.enable_flyby_waypoint_acceptance:
+                cx, cy, _ = self._current_local_pos
+                progress, cross_track = self._leg_progress_and_cross_track(
+                    leg_start_x,
+                    leg_start_y,
+                    x,
+                    y,
+                    cx,
+                    cy,
+                )
+                if progress >= 1.0 and cross_track <= self.flyby_cross_track_m:
+                    self.get_logger().info(
+                        'Waypoint fly-by accepted: '
+                        f'progress={progress:.2f}, cross_track={cross_track:.1f}m'
+                    )
+                    return True
 
             self._spin_sleep(self.dt)
         return False
@@ -280,18 +391,44 @@ class FWMissionNode(Node):
             self.get_logger().error('FCU not connected')
             return 1
 
+        mission_waypoints = list(self.waypoints)
+        if self.insert_launch_lead_waypoint and mission_waypoints:
+            first_wp = mission_waypoints[0]
+            first_horiz_dist = self._horizontal_distance_to(first_wp[0], first_wp[1])
+            if first_horiz_dist < self.min_forward_track_dist_m:
+                cx, cy, _ = self._current_local_pos
+                q = self.local_pose.pose.orientation
+                yaw = self._yaw_from_quaternion(q.x, q.y, q.z, q.w)
+                lead_x = cx + math.cos(yaw) * self.launch_lead_dist_m
+                lead_y = cy + math.sin(yaw) * self.launch_lead_dist_m
+                lead_z = max(first_wp[2], self.takeoff_altitude_m)
+                mission_waypoints[0] = (lead_x, lead_y, lead_z)
+                self.get_logger().warn(
+                    'First waypoint too close for fixed-wing launch; '
+                    f'replaced with lead waypoint ({lead_x:.1f}, {lead_y:.1f}, {lead_z:.1f})'
+                )
+
         # Publish initial setpoint burst (PX4 requires setpoints before OFFBOARD switch)
         self.get_logger().info('Publishing initial setpoints (FW path-following mode)')
-        self._publish_setpoint_burst(100)
+        first_wp = mission_waypoints[0]
+        for _ in range(100):
+            if not rclpy.ok():
+                break
+            vx, vy, vz = self._compute_velocity_to_waypoint(*first_wp)
+            self._publish_fw_setpoint(
+                first_wp[0], first_wp[1], first_wp[2], vx=vx, vy=vy, vz=vz
+            )
+            self._spin_sleep(self.dt)
 
         # Switch to OFFBOARD + arm
         deadline = time.time() + self.preflight_timeout_sec
+        preflight_start_time = time.time()
         last_mode_req = 0.0
         last_arm_req = 0.0
-        used_force_arm = False
+        offboard_since = -1.0
 
         while rclpy.ok() and time.time() < deadline:
-            first_wp = self.waypoints[0]
+            first_wp = mission_waypoints[0]
             vx, vy, vz = self._compute_velocity_to_waypoint(*first_wp)
             self._publish_fw_setpoint(
                 first_wp[0], first_wp[1], first_wp[2], vx=vx, vy=vy, vz=vz
@@ -299,14 +436,23 @@ class FWMissionNode(Node):
 
             mode_ok = self.current_state.mode == 'OFFBOARD'
             arm_ok = self.current_state.armed
+            if mode_ok and offboard_since < 0.0:
+                offboard_since = time.time()
 
             if not mode_ok:
                 if time.time() - last_mode_req > 1.0 and self._set_mode_offboard():
                     self.get_logger().info('OFFBOARD mode set')
                     last_mode_req = time.time()
             elif not arm_ok:
-                if time.time() - last_arm_req > 1.0:
-                    elapsed = time.time() - (deadline - self.preflight_timeout_sec)
+                offboard_age = 0.0 if offboard_since < 0.0 else (time.time() - offboard_since)
+                if offboard_age < self.arm_settle_time_sec:
+                    if time.time() - last_arm_req > 1.0:
+                        self.get_logger().info(
+                            f'OFFBOARD settle wait ({offboard_age:.1f}/{self.arm_settle_time_sec:.1f}s)'
+                        )
+                        last_arm_req = time.time()
+                elif time.time() - last_arm_req > 1.0:
+                    elapsed = time.time() - preflight_start_time
                     self.get_logger().info(
                         f'Waiting for PX4 pre-flight checks ({elapsed:.0f}s elapsed)...'
                     )
@@ -317,7 +463,7 @@ class FWMissionNode(Node):
                         self.get_logger().warn('Attempting force arm (SITL fallback)...')
                         if self._arm_force():
                             self.get_logger().warn('Force arm accepted!')
-                    
+
                     last_arm_req = time.time()
             else:
                 break
@@ -332,16 +478,24 @@ class FWMissionNode(Node):
             return 1
 
         # Fly waypoints
-        self.get_logger().info(f'Starting mission with {len(self.waypoints)} waypoints')
+        self.get_logger().info(f'Starting mission with {len(mission_waypoints)} waypoints')
         start = time.time()
-        per_wp_timeout = max(15.0, self.mission_timeout_sec / float(len(self.waypoints)))
+        per_wp_timeout = max(90.0, self.mission_timeout_sec / float(len(mission_waypoints)))
 
-        for idx, wp in enumerate(self.waypoints):
+        for idx, wp in enumerate(mission_waypoints):
             x, y, z = wp
             self.get_logger().info(
-                f'Waypoint {idx + 1}/{len(self.waypoints)} -> ({x}, {y}, {z})'
+                f'Waypoint {idx + 1}/{len(mission_waypoints)} -> ({x}, {y}, {z})'
             )
-            if not self._reach_waypoint(x, y, z, per_wp_timeout):
+            leg_start_x, leg_start_y, _ = self._current_local_pos
+            if not self._reach_waypoint(
+                x,
+                y,
+                z,
+                per_wp_timeout,
+                leg_start_x,
+                leg_start_y,
+            ):
                 self.get_logger().error(f'Waypoint timeout at index {idx}')
                 return 1
 
@@ -350,16 +504,14 @@ class FWMissionNode(Node):
 
         # Post-mission: loiter or RTL
         if self.loiter_after_mission:
-            last_wp = self.waypoints[-1]
+            last_wp = mission_waypoints[-1]
             self.get_logger().info(
                 f'Loitering at last waypoint ({last_wp[0]}, {last_wp[1]}, {last_wp[2]})'
             )
-            loiter_end = time.time() + 30.0
+            loiter_end = time.time() + self.post_mission_loiter_sec
             while rclpy.ok() and time.time() < loiter_end:
-                self._publish_fw_setpoint(
-                    last_wp[0], last_wp[1], last_wp[2],
-                    type_mask=12288,  # loiter setpoint
-                )
+                vx, vy, vz = self._compute_velocity_to_waypoint(*last_wp)
+                self._publish_fw_setpoint(last_wp[0], last_wp[1], last_wp[2], vx=vx, vy=vy, vz=vz)
                 self._spin_sleep(self.dt)
         else:
             self.get_logger().info('Switching to RTL for landing')

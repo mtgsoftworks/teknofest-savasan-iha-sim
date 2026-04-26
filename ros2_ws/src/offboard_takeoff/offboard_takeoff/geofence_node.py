@@ -26,6 +26,8 @@ class GeofenceNode(Node):
         self.declare_parameter('hss_penalty_per_sec', 5.0)
         self.declare_parameter('auto_rtl_on_breach', True)
         self.declare_parameter('auto_rtl_on_hss', False)
+        self.declare_parameter('boundary_log_interval_sec', 3.0)
+        self.declare_parameter('hss_log_interval_sec', 3.0)
 
         boundary_param = str(self.get_parameter('boundary_corners').value).strip()
         self.boundary_corners = self._parse_boundary(boundary_param)
@@ -37,6 +39,12 @@ class GeofenceNode(Node):
         self.hss_penalty_per_sec = float(self.get_parameter('hss_penalty_per_sec').value)
         self.auto_rtl_on_breach = bool(self.get_parameter('auto_rtl_on_breach').value)
         self.auto_rtl_on_hss = bool(self.get_parameter('auto_rtl_on_hss').value)
+        self.boundary_log_interval_sec = float(
+            self.get_parameter('boundary_log_interval_sec').value
+        )
+        self.hss_log_interval_sec = float(
+            self.get_parameter('hss_log_interval_sec').value
+        )
 
         self.current_state = State()
         self.current_pos = (0.0, 0.0, 0.0)
@@ -60,6 +68,10 @@ class GeofenceNode(Node):
         self._total_penalty = 0.0
         self._breach_rtl_sent = False
         self._hss_rtl_sent = False
+        self._was_boundary_breach = False
+        self._was_in_hss = False
+        self._last_boundary_log_time = 0.0
+        self._last_hss_log_time = 0.0
 
     @staticmethod
     def _parse_boundary(text: str) -> List[Tuple[float, float]]:
@@ -181,10 +193,34 @@ class GeofenceNode(Node):
             else:
                 self.get_logger().error('Failed to send RTL mode')
 
+        # Rate-limit repeated warning logs to prevent spam.
         if boundary_breach:
-            self.get_logger().error(f'OUTSIDE BOUNDARY: ({px:.1f},{py:.1f})')
+            should_log_boundary = (
+                not self._was_boundary_breach
+                or (now - self._last_boundary_log_time) >= self.boundary_log_interval_sec
+            )
+            if should_log_boundary:
+                if self._was_boundary_breach:
+                    self.get_logger().warn(f'STILL OUTSIDE BOUNDARY: ({px:.1f},{py:.1f})')
+                else:
+                    self.get_logger().error(f'OUTSIDE BOUNDARY: ({px:.1f},{py:.1f})')
+                self._last_boundary_log_time = now
+
         elif in_hss:
-            self.get_logger().warn(f'INSIDE {hss_name} - penalty: {self._total_penalty:.0f}')
+            should_log_hss = (
+                not self._was_in_hss
+                or (now - self._last_hss_log_time) >= self.hss_log_interval_sec
+            )
+            if should_log_hss:
+                if self._was_in_hss:
+                    self.get_logger().warn(
+                        f'STILL INSIDE {hss_name} - penalty: {self._total_penalty:.0f}'
+                    )
+                else:
+                    self.get_logger().warn(
+                        f'INSIDE {hss_name} - penalty: {self._total_penalty:.0f}'
+                    )
+                self._last_hss_log_time = now
 
         # Auto RTL on HSS violation
         if in_hss and self.auto_rtl_on_hss and not self._hss_rtl_sent:
@@ -196,6 +232,9 @@ class GeofenceNode(Node):
                 self.get_logger().warn('RTL mode sent due to HSS violation')
             else:
                 self.get_logger().error('Failed to send RTL mode for HSS violation')
+
+        self._was_boundary_breach = boundary_breach
+        self._was_in_hss = in_hss
 
     def run(self) -> int:
         self.get_logger().info(

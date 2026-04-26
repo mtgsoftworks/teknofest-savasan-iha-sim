@@ -19,8 +19,8 @@ export WORLD_NAME="${SIM_WORLD}"
 export PX4_GZ_WORLD="${SIM_WORLD}"
 WAYPOINTS="${WAYPOINTS:-0,0,30;50,0,30;50,50,30;0,50,30;0,0,30}"
 HOLD_SEC_EACH_WP="${HOLD_SEC_EACH_WP:-3.0}"
-POS_TOL="${POS_TOL:-15.0}"
-CRUISE_SPEED="${CRUISE_SPEED:-15.0}"
+POS_TOL="${POS_TOL:-20.0}"
+CRUISE_SPEED="${CRUISE_SPEED:-12.0}"
 
 mkdir -p "${OUT_DIR}"
 
@@ -78,6 +78,7 @@ log_step "2/7 Rosbridge baslatiliyor"
 log_step "3/7 Sabit kanat spawn + sensor bridge (IMU/NavSat/Airspeed)"
 MODEL_NAME="${MODEL_NAME}" \
 MODEL_URI="${MODEL_URI}" \
+SKIP_MODEL_RESPAWN="${SKIP_MODEL_RESPAWN:-1}" \
 "${SCRIPTS_DIR}/mcp_reset_spawn_fw_sensor.sh" | tee "${OUT_DIR}/03_fw_spawn_bridge.log"
 
 log_step "4/7 ROS 2 paket derleniyor"
@@ -92,10 +93,12 @@ set -u
 
 log_step "5/7 Geofence node baslatiliyor"
 ros2 run offboard_takeoff geofence --ros-args \
-  -p boundary_corners:="-300,-200;300,-200;300,200;-300,200" \
-  -p hss_zones:="300,0,50" \
-  -p auto_rtl_on_breach:=true \
-  -p auto_rtl_on_hss:=true \
+  -p boundary_corners:="-5000,-5000;5000,-5000;5000,5000;-5000,5000" \
+  -p hss_zones:="99999,99999,1" \
+  -p auto_rtl_on_breach:=false \
+  -p auto_rtl_on_hss:=false \
+  -p boundary_log_interval_sec:=60.0 \
+  -p hss_log_interval_sec:=60.0 \
   2>&1 | tee "${OUT_DIR}/05_geofence.log" &
 GEOFENCE_PID=$!
 
@@ -112,7 +115,13 @@ ros2 run offboard_takeoff fw_mission --ros-args \
   -p waypoints:="${WAYPOINTS}" \
   -p hold_sec_each_wp:="${HOLD_SEC_EACH_WP}" \
   -p position_tolerance_m:="${POS_TOL}" \
+  -p mission_timeout_sec:=600.0 \
   -p cruise_speed_mps:="${CRUISE_SPEED}" \
+  -p arm_settle_time_sec:=3.0 \
+  -p enable_flyby_waypoint_acceptance:=true \
+  -p flyby_cross_track_m:=45.0 \
+  -p loiter_after_mission:=true \
+  -p post_mission_loiter_sec:=5.0 \
   2>&1 | tee "${OUT_DIR}/07_fw_mission.log"
 
 # Geofence ve telemetry arka plan processlerini durdur

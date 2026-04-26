@@ -15,10 +15,10 @@ MODEL_Z="${MODEL_Z:-0.3}"
 BRIDGE_LOG="${BRIDGE_LOG:-/tmp/ros_gz_fw_sensor_bridge_${MODEL_NAME}.log}"
 SERVICE_TIMEOUT_SEC="${SERVICE_TIMEOUT_SEC:-12}"
 SERVICE_RETRY_COUNT="${SERVICE_RETRY_COUNT:-3}"
+WAIT_MODEL_READY_SEC="${WAIT_MODEL_READY_SEC:-30}"
 # PX4 already spawns the fixed-wing model in start_fw_px4_mavros.sh.
-# Still, keep respawn enabled by default for deterministic mission starts.
-# Set SKIP_MODEL_RESPAWN=1 only when attaching to an already-running model.
-SKIP_MODEL_RESPAWN="${SKIP_MODEL_RESPAWN:-0}"
+# Default to attach mode to avoid duplicate spawn side effects.
+SKIP_MODEL_RESPAWN="${SKIP_MODEL_RESPAWN:-1}"
 
 ensure_core_bridge() {
   if pgrep -f "parameter_bridge /clock@rosgraph_msgs/msg/Clock\[gz.msgs.Clock .* /world/${WORLD_NAME}/control@ros_gz_interfaces/srv/ControlWorld" >/dev/null 2>&1; then
@@ -45,6 +45,21 @@ model_topics_exist() {
   fi
 
   gz topic -l 2>/dev/null | grep -q "^/world/${WORLD_NAME}/model/${MODEL_NAME}/"
+}
+
+wait_model_topics_present() {
+  local timeout_sec="${1:-20}"
+  local elapsed=0
+
+  while [ "${elapsed}" -lt "${timeout_sec}" ]; do
+    if model_topics_exist; then
+      return 0
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+
+  return 1
 }
 
 camera_topic_available() {
@@ -118,46 +133,23 @@ if ! wait_world_services 20; then
   exit 1
 fi
 
-if [ "${SKIP_MODEL_RESPAWN}" = "1" ] && model_topics_exist; then
-  echo "[info] model already exists, resetting model state without respawn: ${MODEL_NAME}"
+echo "[info] waiting for PX4 model topics: ${MODEL_NAME}"
+if ! wait_model_topics_present "${WAIT_MODEL_READY_SEC}"; then
+  echo "[error] model topics did not appear in ${WAIT_MODEL_READY_SEC}s: ${MODEL_NAME}" >&2
+  echo "[hint] check /tmp/px4_fw_sitl.log for Gazebo model spawn errors" >&2
+  exit 1
+fi
 
+if [ "${SKIP_MODEL_RESPAWN}" = "1" ]; then
+  echo "[info] model already exists, skip remove/spawn: ${MODEL_NAME}"
+else
+  echo "[info] pausing world (no time reset)"
   if ! call_service_with_retry \
     "/world/${WORLD_NAME}/control" \
     "ros_gz_interfaces/srv/ControlWorld" \
     "{world_control: {pause: true}}" \
-    "/tmp/world_pause_existing_${MODEL_NAME}.log"; then
-    echo "[error] failed to pause world before model reset: ${WORLD_NAME}" >&2
-    list_world_services >&2
-    exit 1
-  fi
-
-  if ! call_service_with_retry \
-    "/world/${WORLD_NAME}/control" \
-    "ros_gz_interfaces/srv/ControlWorld" \
-    "{world_control: {reset: {model_only: true}}}" \
-    "/tmp/world_reset_model_${MODEL_NAME}.log"; then
-    echo "[error] failed to reset model state in world: ${WORLD_NAME}" >&2
-    list_world_services >&2
-    exit 1
-  fi
-
-  if ! call_service_with_retry \
-    "/world/${WORLD_NAME}/control" \
-    "ros_gz_interfaces/srv/ControlWorld" \
-    "{world_control: {pause: false}}" \
-    "/tmp/world_unpause_existing_${MODEL_NAME}.log"; then
-    echo "[error] failed to unpause world after model reset: ${WORLD_NAME}" >&2
-    list_world_services >&2
-    exit 1
-  fi
-else
-  echo "[info] pause + reset time"
-  if ! call_service_with_retry \
-    "/world/${WORLD_NAME}/control" \
-    "ros_gz_interfaces/srv/ControlWorld" \
-    "{world_control: {pause: true, reset: {time_only: true}}}" \
-    "/tmp/world_reset_time.log"; then
-    echo "[error] failed to pause/reset world: ${WORLD_NAME}" >&2
+    "/tmp/world_pause.log"; then
+    echo "[error] failed to pause world: ${WORLD_NAME}" >&2
     list_world_services >&2
     exit 1
   fi
@@ -166,12 +158,20 @@ else
   call_service_with_retry \
     "/world/${WORLD_NAME}/remove" \
     "ros_gz_interfaces/srv/DeleteEntity" \
-    "{entity: {name: '${MODEL_NAME}'}}" \
+    "{entity: {name: '${MODEL_NAME}', type: 2}}" \
     "/tmp/remove_${MODEL_NAME}.log" || true
+
+  # Let Gazebo apply delete before re-spawning with the same name.
+  sleep 2
 
   echo "[info] spawning model: ${MODEL_NAME} (${MODEL_URI})"
   if ! spawn_model; then
     echo "[error] failed to spawn model ${MODEL_NAME} in world ${WORLD_NAME}" >&2
+    call_service_with_retry \
+      "/world/${WORLD_NAME}/control" \
+      "ros_gz_interfaces/srv/ControlWorld" \
+      "{world_control: {pause: false}}" \
+      "/tmp/world_unpause_after_spawn_fail.log" || true
     list_world_services >&2
     exit 1
   fi

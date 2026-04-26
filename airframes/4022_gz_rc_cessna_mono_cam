@@ -17,6 +17,11 @@ param set-default SIM_GZ_EN_ASPD 1
 # Keep legacy sensor_airspeed_sim disabled to avoid dual airspeed sources.
 param set-default SENS_EN_ARSPDSIM 0
 
+# SITL fixed-wing tests should not be blocked by attitude failure-detector limits
+# during aggressive turns or launch transients.
+param set-default FD_FAIL_R 0
+param set-default FD_FAIL_P 0
+
 param set-default FW_LND_ANG 8
 param set-default NPFG_PERIOD 12
 
