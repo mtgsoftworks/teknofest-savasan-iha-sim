@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<sdf version='1.9'>
+  <model name='teknofest_hss_zone'>
+    <static>true</static>
+    <link name='link'>
+      <!-- Red semi-transparent cylinder: 50m radius default, 100m visible height -->
+      <!-- Scale via world spawn pose or model override -->
+      <visual name='hss_cylinder'>
+        <geometry>
+          <cylinder><radius>50</radius><length>100</length></cylinder>
+        </geometry>
+        <pose>0 0 50 0 0 0</pose>
+        <material>
+          <ambient>1 0 0 0.25</ambient>
+          <diffuse>1 0 0 0.25</diffuse>
+          <specular>0.1 0 0 0.1</specular>
+        </material>
+        <transparency>0.75</transparency>
+      </visual>
+      <!-- Ground ring to mark base clearly -->
+      <visual name='hss_ring'>
+        <pose>0 0 0.05 0 0 0</pose>
+        <geometry>
+          <cylinder><radius>50</radius><length>0.1</length></cylinder>
+        </geometry>
+        <material>
+          <ambient>1 0 0 0.8</ambient>
+          <diffuse>1 0 0 0.8</diffuse>
+        </material>
+      </visual>
+    </link>
+  </model>
+</sdf>

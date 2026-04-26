@@ -1,0 +1,20 @@
+# Python / ROS2
+__pycache__/
+*.pyc
+
+# Local IDE / agent metadata
+.claude/
+
+# ROS2 build artifacts
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+
+# Runtime logs / temp outputs
+*.log
+*.ulg
+tmp/
+
+# OS files
+.DS_Store
+Thumbs.db

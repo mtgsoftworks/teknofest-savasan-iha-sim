@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<sdf version='1.9'>
+  <model name='rc_cessna_mono_cam'>
+    <!-- Compose rc_cessna base + mono_cam at the nose -->
+    <include merge='true'>
+      <uri>model://rc_cessna</uri>
+    </include>
+
+    <!-- Nose-mounted camera: fixed, pointing downward for QR target detection.
+         rc_cessna fuselage box center is at x=-0.14, size 0.65 long
+         Nose tip is at x ~ -0.465. Camera at x=-0.47, z=0.04 (above fuse centerline)
+         pitch = +1.5708 rad (90°) = looking straight down -->
+    <include merge='true'>
+      <uri>model://mono_cam</uri>
+      <pose>-0.47 0 0.04 0 1.5708 0</pose>
+    </include>
+
+    <!-- Add real Gazebo airspeed sensor link/topic expected by PX4 gz_bridge:
+         /link/airspeed_link/sensor/air_speed/air_speed -->
+    <include merge='true'>
+      <uri>model://airspeed</uri>
+      <pose>0 0 0 0 0 0</pose>
+    </include>
+
+    <joint name="CameraJoint" type="fixed">
+      <parent>base_link</parent>
+      <child>camera_link</child>
+      <pose relative_to="base_link">-0.47 0 0.04 0 1.5708 0</pose>
+    </joint>
+
+    <joint name="AirspeedJoint" type="fixed">
+      <parent>base_link</parent>
+      <child>airspeed_link</child>
+      <pose relative_to="base_link">0 0 0 0 0 0</pose>
+    </joint>
+  </model>
+</sdf>
